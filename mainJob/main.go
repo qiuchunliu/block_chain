@@ -1,25 +1,31 @@
 package main
 
 import (
-	//"encoding/hex"
-	//"encoding/json"
-	//"io"
-	//"log"
-	//"net/http"
-	//"os"
-	//"time"
-
-	//"github.com/davecgh/go-spew/spew"
-	//"github.com/gorilla/mux"
-	//"github.com/joho/godotenv"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
+	"encoding/json"
+	"github.com/davecgh/go-spew/spew"
+	"github.com/gorilla/mux"
+	"github.com/joho/godotenv"
+	"io"
+	"log"
+	"net/http"
+	"os"
 	"time"
 )
 
 func main() {
-	fmt.Println(time.Now())
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal(err)
+	}
+	go func() {
+		t := time.Now()
+		genesisBlock := Block{0, t.String(), 0, "", ""}
+		spew.Dump(genesisBlock)
+		BlockChain = append(BlockChain, genesisBlock)
+	}()
+	log.Fatal(run())
 }
 
 // 组成区块链的每个块的数据模型
@@ -107,3 +113,88 @@ func isBlockValid(newBlock, oldBlock Block) bool {
 	两个节点都生成块并添加到各自的链上，那我们应该以谁为准？
 	记住一个原则：始终选择最长的链：
 */
+
+// 通常来说，更长的链表示它的数据（状态）是比较新的
+// 所以我们需要一个函数能帮我们将本地的过期的链切换成最新的链
+func replaceChain(newBlocks []Block) {
+	if len(newBlocks) > len(BlockChain) {
+		BlockChain = newBlocks
+	}
+}
+
+/*
+	我们基本就把所有重要的函数完成了。
+	接下来，我们需要一个方便直观的方式来查看我们的链，包括数据及状态。
+	通过浏览器查看 web 页面可能是最合适的方式
+*/
+// 借助 Gorilla/mux 包，我们先写一个函数来初始化我们的 web 服务
+func handleGetBlockChain(w http.ResponseWriter, r *http.Request) {
+	bytes, err := json.MarshalIndent(BlockChain, "", "  ")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	io.WriteString(w, string(bytes))
+}
+
+type Message struct {
+	BPM int
+}
+
+func respondWithJSON(w http.ResponseWriter, r *http.Request, code int, payload interface{}) {
+	response, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("HTTP 500: Internal Server Error"))
+		return
+	}
+	w.WriteHeader(code)
+	w.Write(response)
+}
+
+func handleWriteBlock(w http.ResponseWriter, r *http.Request) {
+	var m Message
+
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&m); err != nil {
+		respondWithJSON(w, r, http.StatusBadRequest, r.Body)
+		return
+	}
+	defer r.Body.Close()
+
+	newBlock, err := generateBlock(BlockChain[len(BlockChain)-1], m.BPM)
+	if err != nil {
+		respondWithJSON(w, r, http.StatusInternalServerError, m)
+		return
+	}
+	if isBlockValid(newBlock, BlockChain[len(BlockChain)-1]) {
+		newBlockChain := append(BlockChain, newBlock)
+		replaceChain(newBlockChain)
+		spew.Dump(BlockChain)
+	}
+	respondWithJSON(w, r, http.StatusCreated, newBlock)
+}
+
+func makeMuxRouter() http.Handler {
+	muxRouter := mux.NewRouter()
+	muxRouter.HandleFunc("/", handleGetBlockChain).Methods("GET")
+	muxRouter.HandleFunc("/", handleWriteBlock).Methods("POST")
+	return muxRouter
+}
+
+func run() error {
+	mux := makeMuxRouter()
+	httpAddr := os.Getenv("ADDR")
+	log.Println("Listen on ", os.Getenv("ADDR"))
+	s := &http.Server{
+		Addr:           ":" + httpAddr,
+		Handler:        mux,
+		ReadTimeout:    10 * time.Second,
+		WriteTimeout:   10 * time.Second,
+		MaxHeaderBytes: 1 << 20,
+	}
+	if err := s.ListenAndServe(); err != nil {
+		return err
+	}
+	return nil
+}
